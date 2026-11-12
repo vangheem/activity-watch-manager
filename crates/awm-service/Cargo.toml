@@ -1,0 +1,10 @@
+[package]
+name = "awm-service"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Login-item install and status for activity-watch-manager"
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true

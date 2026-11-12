@@ -1,0 +1,142 @@
+name: Release
+
+# Every push to main refreshes the rolling `latest` prerelease; a `v*` tag publishes a release
+# and updates the Homebrew tap.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$crate" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != Cargo.toml version $crate"; exit 1; }
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
+      - name: Package
+        run: |
+          mkdir -p dist/pkg
+          lipo -create -output dist/pkg/awm-server \
+            target/aarch64-apple-darwin/release/awm-server \
+            target/x86_64-apple-darwin/release/awm-server
+          lipo -create -output dist/pkg/awm-collector \
+            target/aarch64-apple-darwin/release/awm-collector \
+            target/x86_64-apple-darwin/release/awm-collector
+          lipo -info dist/pkg/awm-server dist/pkg/awm-collector
+          cp README.md LICENSE dist/pkg/
+          tar -C dist/pkg -czf dist/activity-watch-manager-macos-universal.tar.gz .
+          shasum -a 256 dist/activity-watch-manager-macos-universal.tar.gz | sed 's|dist/||' > dist/activity-watch-manager-macos-universal.tar.gz.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: dist/activity-watch-manager-macos-universal.tar.gz*
+
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir -p dist/pkg
+          cp target/release/awm-server target/release/awm-collector README.md LICENSE dist/pkg/
+          tar -C dist/pkg -czf dist/activity-watch-manager-linux-x86_64.tar.gz .
+          sha256sum dist/activity-watch-manager-linux-x86_64.tar.gz | sed 's|dist/||' > dist/activity-watch-manager-linux-x86_64.tar.gz.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: dist/activity-watch-manager-linux-x86_64.tar.gz*
+
+  publish:
+    name: Publish
+    needs: [test, macos, linux]
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          header="Install the server with \`brew install vangheem/tap/awm-server\`, then \`awm-server install\`."$'\n'"Install a collector with \`brew install vangheem/tap/awm-collector\`, then \`awm-collector install --server URL --token TOKEN\`."$'\n\n'"\`awm-server status\` and \`awm-collector status\` report whether each one is running."
+          gh release create "$GITHUB_REF_NAME" dist/* --title "activity-watch-manager $GITHUB_REF_NAME" --notes "$header" --generate-notes --verify-tag
+      - name: Rolling `latest` prerelease
+        if: github.ref == 'refs/heads/main'
+        run: |
+          notes="Built from ${GITHUB_SHA::7} on main. Replaced on every push to main."
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/* --target "$GITHUB_SHA" --prerelease \
+            --title "Latest build (${GITHUB_SHA::7})" --notes "$notes"
+
+  homebrew:
+    name: Update Homebrew tap
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write formulas
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          macos=$(cut -d' ' -f1 dist/activity-watch-manager-macos-universal.tar.gz.sha256)
+          linux=$(cut -d' ' -f1 dist/activity-watch-manager-linux-x86_64.tar.gz.sha256)
+          bash .github/scripts/homebrew-formula.sh "$version" "$macos" "$linux"
+          cat awm-server.rb awm-collector.rb
+      - name: Push to vangheem/homebrew-tap
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone git@github.com:vangheem/homebrew-tap.git tap
+          mkdir -p tap/Formula
+          cp awm-server.rb awm-collector.rb tap/Formula/
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/awm-server.rb Formula/awm-collector.rb
+          if git diff --cached --quiet; then
+            echo "Formulas unchanged"
+          else
+            git commit -m "activity-watch-manager ${GITHUB_REF_NAME}"
+            git push origin HEAD
+          fi

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Activity Ledger</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script>
+    (function () {
+      var stored = localStorage.getItem("awm-theme");
+      var theme = stored || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <div>
+        <p class="kicker">Activity Watch</p>
+        <h1>Ledger</h1>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="presets" id="presets" role="group" aria-label="Range">
+        <button type="button" data-preset="today">Today</button>
+        <button type="button" data-preset="yesterday">Yesterday</button>
+        <button type="button" data-preset="7d" class="on">7 days</button>
+        <button type="button" data-preset="30d">30 days</button>
+      </div>
+      <label class="date">
+        <span>From</span>
+        <input type="date" id="from">
+      </label>
+      <label class="date">
+        <span>To</span>
+        <input type="date" id="to">
+      </label>
+      <button type="button" id="theme" aria-label="Toggle color theme">Theme</button>
+      <button type="button" id="lock" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <div id="gate" class="gate hidden">
+    <form id="gate-form">
+      <p class="kicker">Activity Ledger</p>
+      <h2>This machine needs the token</h2>
+      <p class="lede">The server token is in the server config. Localhost can open the UI without it.</p>
+      <label>
+        Token
+        <input id="token-input" type="password" autocomplete="current-password" required>
+      </label>
+      <button type="submit">Unlock</button>
+      <p id="gate-error" class="gate-error" hidden></p>
+    </form>
+  </div>
+
+  <p id="error" class="banner hidden" role="alert"></p>
+
+  <main id="app">
+    <section class="machines" id="machines" aria-label="Machines"></section>
+    <section class="stats" id="stats"></section>
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-h">
+          <h2>Days</h2>
+          <p id="range-label"></p>
+        </div>
+        <div id="days"></div>
+      </div>
+      <div class="stack">
+        <div class="panel">
+          <div class="panel-h">
+            <h2>Apps</h2>
+            <p id="app-filter"></p>
+          </div>
+          <div id="apps"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-h"><h2>Categories</h2></div>
+          <div id="categories"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-h">
+        <h2 id="day-title">Day</h2>
+        <p id="day-sub"></p>
+      </div>
+      <div id="timeline"></div>
+    </section>
+
+    <section class="layout">
+      <div class="panel">
+        <div class="panel-h">
+          <h2>Window titles</h2>
+          <div class="scope" id="title-scope" role="group" aria-label="Title scope">
+            <button type="button" data-scope="day" class="on">This day</button>
+            <button type="button" data-scope="range">Range</button>
+          </div>
+        </div>
+        <div id="titles"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-h">
+          <h2>Sites</h2>
+          <p>Browser watchers, not added to active time</p>
+        </div>
+        <div id="sites"></div>
+      </div>
+    </section>
+
+    <section class="panel storage">
+      <div class="panel-h">
+        <h2>Storage</h2>
+        <p id="storage-sub">Each file holds a 30-day period. A range reads every file it touches, together.</p>
+      </div>
+      <div id="storage"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>Activity Ledger</span>
+    <span id="foot-meta"></span>
+  </footer>
+  <div id="tip" class="tip hidden" role="tooltip"></div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>
