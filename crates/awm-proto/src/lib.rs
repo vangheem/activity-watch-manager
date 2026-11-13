@@ -64,6 +64,8 @@ pub struct Summary {
     pub categories: Vec<CategoryTotal>,
     pub titles: Vec<TitleTotal>,
     pub sites: Vec<SiteTotal>,
+    /// Individual browser pages from the web watcher, not mixed into window titles.
+    pub pages: Vec<PageTotal>,
     pub days: Vec<DaySummary>,
 }
 
@@ -99,6 +101,14 @@ pub struct TitleTotal {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteTotal {
+    pub domain: String,
+    pub secs: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageTotal {
+    pub title: String,
+    pub url: String,
     pub domain: String,
     pub secs: f64,
 }

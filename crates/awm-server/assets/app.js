@@ -8,11 +8,12 @@ const state = {
   preset: "7d",
   device: "",
   filterApp: "",
-  titleScope: "day",
   selectedDate: null,
   data: null,
   status: null,
 };
+
+let inflight = 0;
 
 const $ = (id) => document.getElementById(id);
 const tip = $("tip");
@@ -39,7 +40,6 @@ function boot() {
   $("theme").addEventListener("click", toggleTheme);
   $("lock").addEventListener("click", signOut);
   $("gate-form").addEventListener("submit", onUnlock);
-  $("title-scope").addEventListener("click", onScope);
   document.addEventListener("keydown", onKey);
   load();
   loadStatus();
@@ -96,17 +96,6 @@ function onCustomRange() {
   load();
 }
 
-function onScope(event) {
-  const button = event.target.closest("button[data-scope]");
-  if (!button) return;
-  state.titleScope = button.dataset.scope;
-  document.querySelectorAll("#title-scope button").forEach((el) => {
-    el.classList.toggle("on", el === button);
-  });
-  renderTitles();
-  renderSites();
-}
-
 function onKey(event) {
   if (event.target.matches("input, textarea")) return;
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -119,11 +108,7 @@ function onKey(event) {
   state.selectedDate = days[next].date;
   renderDays();
   renderTimeline();
-  renderTitles();
-  renderSites();
 }
-
-let inflight = 0;
 
 async function load() {
   const id = ++inflight;
@@ -142,7 +127,8 @@ async function load() {
     if (id !== inflight) return;
     state.data = data;
     if (!data.days.some((day) => day.date === state.selectedDate)) {
-      state.selectedDate = data.days.length ? data.days[data.days.length - 1].date : null;
+      const active = [...data.days].reverse().find((day) => day.active_secs > 0);
+      state.selectedDate = (active || data.days[data.days.length - 1] || {}).date || null;
     }
     $("gate").classList.add("hidden");
     render();
@@ -434,7 +420,7 @@ function renderTitles() {
   if (!state.data) return;
   const root = $("titles");
   root.replaceChildren();
-  const rows = state.titleScope === "range" ? state.data.titles : (selectedDay()?.titles || []);
+  const rows = state.data.titles || [];
   if (!rows.length) {
     root.append(quiet("No window titles."));
     return;
@@ -463,25 +449,68 @@ function renderSites() {
   if (!state.data) return;
   const root = $("sites");
   root.replaceChildren();
-  const rows = state.titleScope === "range" ? state.data.sites : (selectedDay()?.sites || []);
-  if (!rows.length) {
-    root.append(quiet("No browser events in this view."));
+  const pages = state.data.pages || [];
+  const domains = state.data.sites || [];
+  if (!pages.length && !domains.length) {
+    root.append(quiet("No browser watcher events in this range. Chrome and Brave need the ActivityWatch extension."));
     return;
   }
+  if (domains.length) {
+    const max = domains[0].secs || 1;
+    for (const site of domains.slice(0, 8)) {
+      const row = document.createElement("div");
+      row.className = "row";
+      const swatch = document.createElement("i");
+      swatch.className = "swatch";
+      swatch.style.background = colorFor(site.domain);
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = site.domain;
+      const time = document.createElement("span");
+      time.className = "time";
+      time.textContent = formatDuration(site.secs);
+      const bar = document.createElement("span");
+      bar.className = "bar";
+      const fill = document.createElement("span");
+      fill.style.width = Math.max(2, (site.secs / max) * 100) + "%";
+      fill.style.background = colorFor(site.domain);
+      bar.append(fill);
+      row.append(swatch, name, time, bar);
+      root.append(row);
+    }
+  }
+  if (!pages.length) return;
   const list = document.createElement("div");
-  list.className = "list";
-  for (const row of rows) {
+  list.className = "list pages";
+  for (const page of pages) {
     const item = document.createElement("div");
-    item.className = "site-row";
-    const name = document.createElement("strong");
-    name.textContent = row.domain;
+    item.className = "title-row";
+    const text = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = page.title || page.domain;
+    const meta = document.createElement("span");
+    meta.textContent = " " + pageLabel(page);
+    text.append(title, meta);
     const time = document.createElement("div");
     time.className = "time-col";
-    time.textContent = formatDuration(row.secs);
-    item.append(name, time);
+    time.textContent = formatDuration(page.secs);
+    item.append(text, time);
     list.append(item);
   }
   root.append(list);
+}
+
+function pageLabel(page) {
+  if (!page.url) return page.domain || "";
+  try {
+    const url = new URL(page.url);
+    const path = (url.pathname + url.search + url.hash).replace(/\/$/, "");
+    if (!path || path === "/") return page.domain || url.hostname;
+    const short = path.length > 42 ? path.slice(0, 41) + "…" : path;
+    return (page.domain || url.hostname) + short;
+  } catch {
+    return page.domain || page.url;
+  }
 }
 
 function renderStorage() {

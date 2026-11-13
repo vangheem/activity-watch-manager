@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 
 use awm_proto::{
-    AppTotal, CategoryRule, CategoryTotal, DaySummary, Lane, MachineInfo, MachineTotal, Segment,
-    SiteTotal, Summary, TitleTotal,
+    AppTotal, CategoryRule, CategoryTotal, DaySummary, Lane, MachineInfo, MachineTotal, PageTotal,
+    Segment, SiteTotal, Summary, TitleTotal,
 };
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -22,7 +22,8 @@ const MAX_DAYS: i64 = 400;
 const TOP_APPS: usize = 30;
 const TOP_TITLES: usize = 25;
 const TOP_DAY_TITLES: usize = 12;
-const TOP_SITES: usize = 20;
+const TOP_SITES: usize = 12;
+const TOP_PAGES: usize = 40;
 const TOP_DAY_SITES: usize = 8;
 const OTHER_COLOR: &str = "#9a8f84";
 
@@ -115,6 +116,9 @@ pub fn build(input: AggregateInput) -> Result<Summary, String> {
     let mut titles: HashMap<(String, String), i64> = HashMap::new();
     let mut cats: HashMap<String, i64> = HashMap::new();
     let mut sites: HashMap<String, i64> = HashMap::new();
+    let mut pages: HashMap<String, PageAcc> = HashMap::new();
+    let web_devices: std::collections::HashSet<&str> =
+        webs.iter().map(|event| event.device_id.as_str()).collect();
     let mut machine_active: HashMap<String, i64> = HashMap::new();
     let mut active_ms = 0i64;
     let mut afk_ms = 0i64;
@@ -165,7 +169,8 @@ pub fn build(input: AggregateInput) -> Result<Summary, String> {
                 *apps.entry(span.app.clone()).or_default() += dur;
                 let cat_name = span.category.clone().unwrap_or_else(|| "Other".into());
                 *cats.entry(cat_name).or_default() += dur;
-                if !span.title.is_empty() {
+                // Browser tab titles belong with websites, not the app window list.
+                if !span.title.is_empty() && !is_browser(&span.app) {
                     *titles
                         .entry((span.app.clone(), span.title.clone()))
                         .or_default() += dur;
@@ -195,27 +200,33 @@ pub fn build(input: AggregateInput) -> Result<Summary, String> {
         }
 
         for event in &webs {
-            let Some((start, end)) = event_span(event) else {
+            record_visit(
+                event,
+                &afk_by_device,
+                clip_start,
+                clip_end,
+                &mut sites,
+                &mut day_sites,
+                &mut pages,
+            );
+        }
+        for (device_id, events) in &windows {
+            if web_devices.contains(device_id.as_str()) {
                 continue;
-            };
-            let Some(url) = event.url.as_deref() else {
-                continue;
-            };
-            let Some(domain) = domain_of(url) else {
-                continue;
-            };
-            let afk = afk_by_device
-                .get(&event.device_id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            for (s, e) in subtract(start, end, afk) {
-                let cs = s.max(clip_start);
-                let ce = e.min(clip_end);
-                if ce > cs {
-                    let dur = ce - cs;
-                    *sites.entry(domain.clone()).or_default() += dur;
-                    *day_sites.entry(domain.clone()).or_default() += dur;
+            }
+            for event in events {
+                if !event.app.as_deref().is_some_and(is_browser) {
+                    continue;
                 }
+                record_visit(
+                    event,
+                    &afk_by_device,
+                    clip_start,
+                    clip_end,
+                    &mut sites,
+                    &mut day_sites,
+                    &mut pages,
+                );
             }
         }
 
@@ -339,8 +350,78 @@ pub fn build(input: AggregateInput) -> Result<Summary, String> {
         categories: category_totals,
         titles: top_titles(&titles, TOP_TITLES),
         sites: top_sites(&sites, TOP_SITES),
+        pages: top_pages(&pages, TOP_PAGES),
         days,
     })
+}
+
+struct PageAcc {
+    title: String,
+    url: String,
+    domain: String,
+    ms: i64,
+}
+
+fn record_visit(
+    event: &StoredEvent,
+    afk_by_device: &HashMap<String, Vec<(i64, i64)>>,
+    clip_start: i64,
+    clip_end: i64,
+    sites: &mut HashMap<String, i64>,
+    day_sites: &mut HashMap<String, i64>,
+    pages: &mut HashMap<String, PageAcc>,
+) {
+    let Some((start, end)) = event_span(event) else {
+        return;
+    };
+    let url = event.url.clone().unwrap_or_default();
+    let title = event.title.clone().unwrap_or_default();
+    if url.is_empty() && title.is_empty() {
+        return;
+    }
+    let domain = domain_of(&url).unwrap_or_else(|| {
+        if title.is_empty() {
+            "page".into()
+        } else {
+            title.clone()
+        }
+    });
+    let afk = afk_by_device
+        .get(&event.device_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for (s, e) in subtract(start, end, afk) {
+        let cs = s.max(clip_start);
+        let ce = e.min(clip_end);
+        if ce <= cs {
+            continue;
+        }
+        let dur = ce - cs;
+        *sites.entry(domain.clone()).or_default() += dur;
+        *day_sites.entry(domain.clone()).or_default() += dur;
+        let key = format!(
+            "{domain}\n{}",
+            if title.is_empty() {
+                domain.as_str()
+            } else {
+                title.as_str()
+            }
+        );
+        let page = pages.entry(key).or_insert_with(|| PageAcc {
+            title: if title.is_empty() {
+                domain.clone()
+            } else {
+                title.clone()
+            },
+            url: url.clone(),
+            domain: domain.clone(),
+            ms: 0,
+        });
+        page.ms += dur;
+        if page.url.is_empty() && !url.is_empty() {
+            page.url = url.clone();
+        }
+    }
 }
 
 fn category_index(rules: &[CategoryRule]) -> HashMap<String, CatInfo> {
@@ -655,8 +736,61 @@ fn top_sites(map: &HashMap<String, i64>, limit: usize) -> Vec<SiteTotal> {
     rows
 }
 
+fn top_pages(map: &HashMap<String, PageAcc>, limit: usize) -> Vec<PageTotal> {
+    let mut rows: Vec<PageTotal> = map
+        .values()
+        .map(|page| PageTotal {
+            title: page.title.clone(),
+            url: page.url.clone(),
+            domain: page.domain.clone(),
+            secs: ms_to_secs(page.ms),
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.secs
+            .partial_cmp(&a.secs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    rows.truncate(limit);
+    rows
+}
+
+fn is_browser(app: &str) -> bool {
+    matches!(
+        app.to_ascii_lowercase().as_str(),
+        "google chrome"
+            | "chrome"
+            | "chromium"
+            | "safari"
+            | "firefox"
+            | "arc"
+            | "brave browser"
+            | "brave"
+            | "microsoft edge"
+            | "edge"
+            | "orion"
+            | "dia"
+            | "vivaldi"
+            | "helium"
+            | "opera"
+            | "opera gx"
+    )
+}
+
 fn domain_of(url: &str) -> Option<String> {
-    let rest = url.split("://").nth(1).unwrap_or(url);
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let scheme = scheme.to_ascii_lowercase();
+    if matches!(
+        scheme.as_str(),
+        "chrome" | "brave" | "edge" | "about" | "chrome-extension" | "moz-extension"
+    ) {
+        let page = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        let page = if page.is_empty() { "page" } else { page };
+        return Some(format!("{scheme}://{page}"));
+    }
+    if !scheme.is_empty() && scheme != "http" && scheme != "https" {
+        return Some(scheme);
+    }
     let host = rest.split(['/', '?', '#']).next()?;
     let host = host.split('@').next_back()?;
     let host = host.split(':').next()?;
@@ -746,5 +880,43 @@ mod tests {
         .unwrap();
         assert!((summary.active_secs - 2700.0).abs() < 0.01);
         assert!((summary.afk_secs - 900.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn browser_tabs_are_pages_not_window_titles() {
+        let mut web = window("dev", 60_000, 60.0, "Google Chrome", "Inbox - Gmail");
+        web.bucket_type = "web.tab.current".into();
+        web.bucket_id = "aw-watcher-web-chrome".into();
+        web.app = None;
+        web.url = Some("https://mail.google.com/mail/u/0/#inbox".into());
+        let summary = build(AggregateInput {
+            events: vec![
+                window("dev", 60_000, 60.0, "Google Chrome", "Inbox - Gmail"),
+                window("dev", 0, 60.0, "Code", "main.rs"),
+                web,
+            ],
+            machines: vec![],
+            start_ms: 0,
+            end_ms: 200_000,
+            timezone: "UTC".into(),
+            categories: vec![],
+            databases: vec![],
+            last_ingest_ms: None,
+        })
+        .unwrap();
+
+        assert!(summary
+            .titles
+            .iter()
+            .all(|title| title.app != "Google Chrome"));
+        assert!(summary.titles.iter().any(|title| title.app == "Code"));
+        assert!(summary
+            .pages
+            .iter()
+            .any(|page| page.domain == "mail.google.com" && page.title.contains("Gmail")));
+        assert!(summary
+            .sites
+            .iter()
+            .any(|site| site.domain == "mail.google.com"));
     }
 }
