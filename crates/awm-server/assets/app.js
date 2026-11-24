@@ -10,13 +10,15 @@ const state = {
   filterApp: "",
   selectedDate: null,
   data: null,
+  dayData: null,
   status: null,
 };
 
-let inflight = 0;
-
 const $ = (id) => document.getElementById(id);
 const tip = $("tip");
+
+let inflight = 0;
+let dayInflight = 0;
 
 boot();
 
@@ -105,13 +107,12 @@ function onKey(event) {
   if (index < 0) return;
   const next = event.key === "ArrowLeft" ? index - 1 : index + 1;
   if (next < 0 || next >= days.length) return;
-  state.selectedDate = days[next].date;
-  renderDays();
-  renderTimeline();
+  selectDay(days[next].date);
 }
 
 async function load() {
   const id = ++inflight;
+  ++dayInflight;
   $("app").classList.add("is-loading");
   hideError();
   try {
@@ -126,12 +127,19 @@ async function load() {
     const data = await api("/api/v1/summary?" + query.toString());
     if (id !== inflight) return;
     state.data = data;
+    state.dayData = null;
     if (!data.days.some((day) => day.date === state.selectedDate)) {
       const active = [...data.days].reverse().find((day) => day.active_secs > 0);
       state.selectedDate = (active || data.days[data.days.length - 1] || {}).date || null;
     }
     $("gate").classList.add("hidden");
-    render();
+    renderDays();
+    $("range-label").textContent = data.databases.length
+      ? data.databases.length + " period " + (data.databases.length === 1 ? "database" : "databases")
+      : "no period files in this range";
+    if (state.status) renderStorage();
+    if (data.days.length > 1) loadDay();
+    else renderDetails();
   } catch (err) {
     if (id !== inflight) return;
     if (err.status === 401) {
@@ -144,6 +152,33 @@ async function load() {
     showError(err.message || "Could not load activity.");
   } finally {
     if (id === inflight) $("app").classList.remove("is-loading");
+  }
+}
+
+// The detail panels follow the selected day. In a multi-day view that needs
+// its own summary, fetched from the day bounds the range payload provides.
+async function loadDay() {
+  const day = selectedDay();
+  if (!day || state.data.days.length <= 1) {
+    renderDetails();
+    return;
+  }
+  const id = ++dayInflight;
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const query = new URLSearchParams({
+    start: new Date(day.start_ms).toISOString(),
+    end: new Date(day.end_ms).toISOString(),
+    tz,
+  });
+  if (state.device) query.set("device", state.device);
+  try {
+    const data = await api("/api/v1/summary?" + query.toString());
+    if (id !== dayInflight) return;
+    state.dayData = data;
+    renderDetails();
+  } catch (err) {
+    if (id !== dayInflight) return;
+    showError(err.message || "Could not load that day.");
   }
 }
 
@@ -181,27 +216,21 @@ async function api(path) {
   return res.json();
 }
 
-function render() {
-  const data = state.data;
-  if (!data) return;
+function renderDetails() {
+  if (!state.data) return;
   renderMachines();
   renderStats();
-  renderDays();
   renderApps();
   renderCategories();
   renderTimeline();
   renderTitles();
   renderSites();
-  if (state.status) renderStorage();
-  $("range-label").textContent = data.databases.length
-    ? data.databases.length + " period " + (data.databases.length === 1 ? "database" : "databases")
-    : "no period files in this range";
 }
 
 function renderMachines() {
   const root = $("machines");
   root.replaceChildren();
-  const data = state.data;
+  const data = focusData();
   const all = document.createElement("button");
   all.type = "button";
   all.className = "chip" + (state.device ? "" : " on");
@@ -231,14 +260,14 @@ function selectDevice(id) {
 }
 
 function renderStats() {
-  const data = state.data;
+  const data = focusData();
   const machines = state.device ? 1 : data.machines.length;
   const root = $("stats");
   root.replaceChildren();
   const cards = [
     ["Active", formatDuration(data.active_secs), machines > 1 ? "sum across machines" : "focused time"],
     ["Idle", formatDuration(data.afk_secs), "afk watcher"],
-    ["Apps", String(data.apps.length), "in this range"],
+    ["Apps", String(data.apps.length), "on this day"],
     ["Last report", data.last_ingest_ms ? formatAgo(data.last_ingest_ms) : "never", formatCount(data.event_count) + " events read"],
   ];
   for (const [label, value, note] of cards) {
@@ -293,18 +322,16 @@ function renderDays() {
 function selectDay(date) {
   state.selectedDate = date;
   renderDays();
-  renderTimeline();
-  renderTitles();
-  renderSites();
+  loadDay();
 }
 
 function renderApps() {
   const root = $("apps");
   root.replaceChildren();
-  const apps = state.data.apps;
+  const apps = focusData().apps;
   $("app-filter").textContent = state.filterApp ? "showing " + state.filterApp : "";
   if (!apps.length) {
-    root.append(quiet("No focused apps in this range."));
+    root.append(quiet("No focused apps on this day."));
     return;
   }
   const max = apps[0].secs || 1;
@@ -347,7 +374,7 @@ function renderApps() {
 function renderCategories() {
   const root = $("categories");
   root.replaceChildren();
-  const cats = state.data.categories;
+  const cats = focusData().categories;
   if (!cats.length) {
     root.append(quiet("No categories yet."));
     return;
@@ -420,7 +447,7 @@ function renderTitles() {
   if (!state.data) return;
   const root = $("titles");
   root.replaceChildren();
-  const rows = state.data.titles || [];
+  const rows = focusData().titles || [];
   if (!rows.length) {
     root.append(quiet("No window titles."));
     return;
@@ -449,10 +476,11 @@ function renderSites() {
   if (!state.data) return;
   const root = $("sites");
   root.replaceChildren();
-  const pages = state.data.pages || [];
-  const domains = state.data.sites || [];
+  const data = focusData();
+  const pages = data.pages || [];
+  const domains = data.sites || [];
   if (!pages.length && !domains.length) {
-    root.append(quiet("No browser watcher events in this range. Chrome and Brave need the ActivityWatch extension."));
+    root.append(quiet("No browser watcher events on this day. Chrome and Brave need the ActivityWatch extension."));
     return;
   }
   if (domains.length) {
@@ -624,6 +652,12 @@ function hideTip() {
 
 function selectedDay() {
   return state.data?.days.find((day) => day.date === state.selectedDate) || null;
+}
+
+// The summary the detail panels draw from: the selected day's own summary in a
+// multi-day view, otherwise the range summary, which already is one day.
+function focusData() {
+  return state.dayData || state.data;
 }
 
 function currentRange() {
